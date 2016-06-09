@@ -4,7 +4,7 @@ PKG_CONFIG?=pkg-config
 CFLAGS?=-Wall -O3
 
 CFLAGS+=`$(PKG_CONFIG) --cflags alsa` -pthread
-LOADLIBES=`$(PKG_CONFIG) --libs alsa`
+LOADLIBES=`$(PKG_CONFIG) --libs alsa` -lm
 
 all: mod-alsa-test
 

@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <getopt.h>
@@ -46,7 +47,10 @@ typedef struct  {
 	unsigned int       play_nchan;
 	unsigned int       capt_nchan;
 
-	unsigned int       run_for;
+	float              run_for;
+	bool               debug;
+
+	float**            testbuffers;
 
 	/* state */
 	snd_pcm_t* play_handle;
@@ -269,9 +273,12 @@ static int capt_done (AlsaIO* io, int len)
 }
 
 
-static void clear_chan (AlsaIO* io, size_t chan, snd_pcm_uframes_t len)
+static void clear_chan (AlsaIO* io, char *dst, snd_pcm_uframes_t len)
 {
-	memset (io->play_ptr [chan], 0, io->play_bytes_per_sample * len);
+	while (len--) {
+		*((int *) dst) = 0;
+		dst += io->play_step;
+	}
 }
 
 static int play_init (AlsaIO* io, snd_pcm_uframes_t len)
@@ -331,7 +338,7 @@ static int pcm_start (AlsaIO* io)
 		for (i = 0; i < io->play_periods_per_cycle; i++) {
 			play_init (io, io->samples_per_period);
 			for (j = 0; j < io->play_nchan; j++) {
-				clear_chan (io, j, io->samples_per_period);
+				clear_chan (io, io->play_ptr [j], io->samples_per_period);
 			}
 			play_done (io, io->samples_per_period);
 		}
@@ -472,13 +479,23 @@ static snd_pcm_sframes_t pcm_wait (AlsaIO* io)
 
 	play_av = 999999999;
 	if (io->play_handle && (play_av = snd_pcm_avail_update (io->play_handle)) < 0) {
+		if (io->debug) {
+			fprintf (stderr, "play avail %ld\n", play_av);
+		}
 		recover (io);
 		return 0;
 	}
 	capt_av = 999999999;
 	if (io->capt_handle && (capt_av = snd_pcm_avail_update (io->capt_handle)) < 0) {
+		if (io->debug) {
+			fprintf (stderr, "capt avail %ld\n", capt_av);
+		}
 		recover (io);
 		return 0;
+	}
+
+	if (io->debug && io->play_handle && io->capt_handle && capt_av != play_av) {
+		fprintf (stderr, "async avail play:%ld capt:%ld\n", play_av, capt_av);
 	}
 
 	return (capt_av < play_av) ? capt_av : play_av;
@@ -495,20 +512,42 @@ void *run_thread (void* arg) {
 		int c;
 		long nr = pcm_wait (io);
 
+		if (io->debug) {
+			printf ("proc: %ld\n", nr);
+		}
 		while (nr >= (long) io->samples_per_period) {
 			capt_init (io, io->samples_per_period);
 			for (c = 0; c < io->capt_nchan; ++c) {
-				// io->capt_ptr [c]
+#if 0
+				char const *src = io->capt_ptr [c];
+				for (int i = 0; i < io->samples_per_period; ++i) {
+					io->testbuffers[c][i] = *((int *) src) / (float)0x7fffff00; // S32LE
+					src += io->capt_step;
+				}
+#endif
 			}
 			capt_done (io, io->samples_per_period);
 
 			play_init (io, io->samples_per_period);
 			for (c = 0; c < io->play_nchan; ++c) {
-				// io->play_ptr [c]
-				clear_chan (io, c, io->samples_per_period);
+				char *dst = io->play_ptr [c];
+#if 0
+				for (int i = 0; i < io->samples_per_period; ++i) {
+					*((int *) dst) = io->testbuffers[c][i] * 0x7fffff00; // S32LE
+					dst += io->play_step;
+				}
+#elif 0
+				for (int i = 0; i < io->samples_per_period; ++i) {
+					*((int *) dst) = sin (M_PI * i / io->samples_per_period) * 0x7fffff00; // S32LE
+					dst += io->play_step;
+				}
+#else
+				clear_chan (io, dst, io->samples_per_period);
+#endif
 			}
 
 			play_done (io, io->samples_per_period);
+
 			nr -= io->samples_per_period;
 		}
 		if (signalled) {
@@ -567,7 +606,10 @@ static const struct option long_options[] = {
 int main (int argc, char** argv)
 {
 	AlsaIO io;
+	unsigned int i;
+	unsigned int n_bufs = 0;
 	memset (&io, 0, sizeof (io));
+	bool sync = true;
 
 	io.samplerate = 48000;
 	io.samples_per_period = 128;
@@ -576,6 +618,7 @@ int main (int argc, char** argv)
 	io.play_nchan = 2;
 	io.capt_nchan = 2;
 	io.run_for = 10; // seconds
+	io.debug = false;
 
 	int rt_priority = -20;
 
@@ -587,6 +630,7 @@ int main (int argc, char** argv)
 	while ((c = getopt_long (argc, argv,
 			   "C:" /* capture device */
 			   "d:" /* devices */
+			   "D"  /* */
 			   "h"  /* help */
 			   "i:" /* input channel count */
 			   "L:" /* test-run duration */
@@ -596,6 +640,7 @@ int main (int argc, char** argv)
 			   "P:" /* playback */
 			   "p:" /* period/buffer size */
 			   "R:" /* realtime priority */
+			   "S"  /* */
 			   "V", /* version */
 			   long_options, (int *) 0)) != EOF) {
 		switch (c) {
@@ -617,6 +662,9 @@ int main (int argc, char** argv)
 				capt_device = strdup (optarg);
 				play_device = strdup (optarg);
 				break;
+			case 'D':
+				io.debug = true;
+				break;
 			case 'i':
 				v = atoi (optarg);
 				if (v < 0) {
@@ -626,8 +674,9 @@ int main (int argc, char** argv)
 				} else {
 					io.capt_nchan = v;
 				}
+				break;
 			case 'L':
-				io.run_for = atoi (optarg);
+				io.run_for = atof (optarg);
 				break;
 			case 'N':
 				v = atoi (optarg);
@@ -652,12 +701,13 @@ int main (int argc, char** argv)
 			case 'o':
 				v = atoi (optarg);
 				if (v < 0) {
-					io.capt_nchan = 0; // auto
+					io.play_nchan = 0; // auto
 				} else if (v > 64) {
 					io.play_nchan = 64;
 				} else {
 					io.play_nchan = v;
 				}
+				break;
 			case 'P':
 				free (play_device);
 				play_device = strdup (optarg);
@@ -674,6 +724,9 @@ int main (int argc, char** argv)
 				break;
 			case 'R':
 				rt_priority = atoi (optarg);
+				break;
+			case 'S':
+				sync = false;
 				break;
 			case 'r':
 				v = atoi (optarg);
@@ -734,6 +787,7 @@ int main (int argc, char** argv)
 		goto out;
 	}
 
+	io.synced = false;
 	/* setup */
 	if (io.play_handle) {
 		if (set_hwpar (&io, play_hwpar, true) < 0) {
@@ -754,7 +808,7 @@ int main (int argc, char** argv)
 		}
 		io.capt_npfd = snd_pcm_poll_descriptors_count (io.capt_handle);
 
-		if (io.play_handle) {
+		if (io.play_handle && sync) {
 			io.synced = ! snd_pcm_link (io.play_handle, io.capt_handle);
 		}
 	}
@@ -860,6 +914,7 @@ int main (int argc, char** argv)
 		fprintf (stdout, "  format     : %s\n",  snd_pcm_format_name (play_format));
 	} else {
 		fprintf (stdout, " not enabled\n");
+		io.play_nchan = 0;
 	}
 	fprintf (stdout, "capture:  ");
 	if (io.capt_handle) {
@@ -874,10 +929,18 @@ int main (int argc, char** argv)
 		}
 	} else {
 		fprintf (stdout, " not enabled\n");
+		io.capt_nchan = 0;
 	}
 
 	if (pcm_start (&io)) {
 		goto out;
+	}
+
+	n_bufs = io.play_nchan > io.capt_nchan ? io.play_nchan : io.capt_nchan;
+	io.testbuffers = (float**) malloc (n_bufs * sizeof (float*));
+
+	for (i = 0; i < n_bufs; ++i) {
+		io.testbuffers[i] = (float*) malloc (io.samples_per_period * sizeof (float));
 	}
 
 	signal (SIGINT, handle_sig);
@@ -913,6 +976,10 @@ out:
 	if (io.capt_handle) {
 		snd_pcm_close (io.capt_handle);
 	}
+	for (i = 0; i < n_bufs; i++) {
+		free (io.testbuffers[i]);
+	}
+	free (io.testbuffers);
 
 	snd_pcm_sw_params_free (capt_swpar);
 	snd_pcm_hw_params_free (capt_hwpar);
