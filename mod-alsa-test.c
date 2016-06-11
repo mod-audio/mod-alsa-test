@@ -332,7 +332,7 @@ static int pcm_start (AlsaIO* io)
 	if (io->play_handle) {
 		n = snd_pcm_avail_update (io->play_handle);
 		if (n != io->samples_per_period * io->play_periods_per_cycle) {
-			fprintf  (stderr, "full buffer not available at start.\n");
+			fprintf  (stderr, "full buffer not available at start (%u).\n", n);
 			return -1;
 		}
 		for (i = 0; i < io->play_periods_per_cycle; i++) {
@@ -375,6 +375,9 @@ static int recover (AlsaIO* io)
 {
 	int err;
 	snd_pcm_status_t* stat;
+	if (io->debug) {
+		printf("recover ()\n");
+	}
 
 	snd_pcm_status_alloca (&stat);
 
@@ -562,6 +565,7 @@ void *run_thread (void* arg) {
 static void usage (int status) {
 	printf ("mod-alsa-test - Exercise moddevice.com soundcard\n");
 	printf ("Usage: mod-alsa-test [ OPTIONS ]\n");
+	// TODO update option...
 	printf ("Options:\n\
       -h, --help                 display this help and exit\n\
       -C, --capture <hw:dev>     capture device.\n\
@@ -593,6 +597,7 @@ static const struct option long_options[] = {
 	{"inchannels",   required_argument, 0, 'i'},
 	{"loop",         required_argument, 0, 'L'},
 	{"nperiods",     required_argument, 0, 'n'},
+	{"no-op",        no_argument,       0,  1 },
 	{"play-periods", required_argument, 0, 'n'},
 	{"capt-periods", required_argument, 0, 'N'},
 	{"outchannels",  required_argument, 0, 'o'},
@@ -610,6 +615,7 @@ int main (int argc, char** argv)
 	unsigned int n_bufs = 0;
 	memset (&io, 0, sizeof (io));
 	bool sync = true;
+	bool noop = false;
 
 	io.samplerate = 48000;
 	io.samples_per_period = 128;
@@ -737,6 +743,9 @@ int main (int argc, char** argv)
 				} else {
 					io.samplerate = v;
 				}
+				break;
+			case 1:
+				noop = true;
 				break;
 
 			default:
@@ -945,19 +954,30 @@ int main (int argc, char** argv)
 
 	signal (SIGINT, handle_sig);
 
-	if (rt_priority < 0) {
-		err = realtime_pthread_create (SCHED_FIFO, rt_priority, 100000, &process_thread, run_thread, &io);
+	if (noop) {
+		// only open the device, don't do anything
+		if (io.run_for == 0) {
+			while (!signalled) {
+				sleep (1);
+			}
+		} else {
+			sleep (io.run_for);
+		}
 	} else {
-		err = pthread_create (&process_thread, NULL, run_thread, &io);
-	}
+		if (rt_priority < 0) {
+			err = realtime_pthread_create (SCHED_FIFO, rt_priority, 100000, &process_thread, run_thread, &io);
+		} else {
+			err = pthread_create (&process_thread, NULL, run_thread, &io);
+		}
 
-	if (err) {
-		fprintf (stderr, "cannot create realtime process thread.\n");
-		pcm_stop (&io);
-		goto out;
-	} else {
-		void *status;
-		pthread_join (process_thread, &status);
+		if (err) {
+			fprintf (stderr, "cannot create realtime process thread.\n");
+			pcm_stop (&io);
+			goto out;
+		} else {
+			void *status;
+			pthread_join (process_thread, &status);
+		}
 	}
 
 	if (pcm_stop (&io)) {
