@@ -38,6 +38,12 @@
 #include <sched.h>
 #include <alsa/asoundlib.h>
 
+#ifdef __aarch64__
+#define SOUNDCARD_LABEL "DUOX"
+#else
+#define SOUNDCARD_LABEL "MODDUO"
+#endif
+
 typedef struct  {
 	/* settings */
 	unsigned int       samplerate;
@@ -628,8 +634,8 @@ int main (int argc, char** argv)
 
 	int rt_priority = -20;
 
-	char *play_device = strdup ("hw:MODDUO");
-	char *capt_device = strdup ("hw:MODDUO");
+	char *play_device = strdup ("hw:" SOUNDCARD_LABEL);
+	char *capt_device = strdup ("hw:" SOUNDCARD_LABEL);
 
 	int c;
 	int v;
